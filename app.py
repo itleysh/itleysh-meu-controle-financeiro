@@ -1,54 +1,66 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
+from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
 
-# 1. FUNÇÃO PARA CRIAR O BANCO DE DADOS (Onde os gastos ficam salvos)
-def init_db():
-    conn = sqlite3.connect('meus_gastos.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS compras 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  data TEXT, estabelecimento TEXT, valor REAL)''')
-    conn.commit()
-    conn.close()
-
-# 2. FUNÇÃO PARA SALVAR UM NOVO GASTO
-def salvar_dados(loja, valor):
-    conn = sqlite3.connect('meus_gastos.db')
-    c = conn.cursor()
-    data_atual = datetime.now().strftime("%d/%m/%Y %H:%M")
-    c.execute("INSERT INTO compras (data, estabelecimento, valor) VALUES (?, ?, ?)",
-              (data_atual, loja, valor))
-    conn.commit()
-    conn.close()
-
-# --- INTERFACE DO APP (O que aparece na tela) ---
-st.set_page_config(page_title="Controle Latam Pass", page_icon="✈️")
+# --- CONFIGURAÇÃO DA PÁGINA ---
+st.set_page_config(page_title="Controle Latam Pass", page_icon="✈️", layout="centered")
 st.title("💳 Meu Controle Itaucard")
+st.markdown("Integrado com Google Sheets")
 
-init_db()
+# --- 1. CONEXÃO COM O GOOGLE SHEETS ---
+# O Streamlit busca o link da planilha que você salvou em "Secrets"
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-# Formulário para inserir gasto manualmente (enquanto não automatizamos)
-with st.form("novo_gasto"):
-    st.write("Adicionar Gasto Manual")
-    loja = st.text_input("Nome do Estabelecimento")
-    valor = st.number_input("Valor da Compra (R$)", min_value=0.0, step=0.01)
-    enviar = st.form_submit_button("Salvar Gasto")
-    
-    if enviar and loja:
-        salvar_dados(loja, valor)
-        st.success(f"Gasto em {loja} salvo com sucesso!")
+# Função para buscar os dados da planilha em tempo real
+def carregar_dados():
+    try:
+        # ttl=0 garante que ele não use memória antiga e pegue o que está no Sheets agora
+        return conn.read(ttl=0)
+    except Exception:
+        # Se a planilha estiver vazia, cria um modelo básico
+        return pd.DataFrame(columns=["data", "estabelecimento", "valor"])
 
-# Mostrar a tabela de gastos
-st.divider()
+df_existente = carregar_dados()
+
+# --- 2. INTERFACE: FORMULÁRIO DE ENTRADA ---
+with st.sidebar:
+    st.header("Novo Lançamento")
+    with st.form("novo_gasto", clear_on_submit=True):
+        loja = st.text_input("Nome do Estabelecimento")
+        valor = st.number_input("Valor da Compra (R$)", min_value=0.0, step=0.01)
+        enviar = st.form_submit_button("Salvar Gasto")
+        
+        if enviar:
+            if loja and valor > 0:
+                # Prepara os novos dados
+                nova_linha = pd.DataFrame([{
+                    "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                    "estabelecimento": loja,
+                    "valor": valor
+                }])
+                
+                # Junta o novo com o velho
+                df_atualizado = pd.concat([df_existente, nova_linha], ignore_index=True)
+                
+                # Envia tudo de volta para o Google Sheets
+                conn.update(data=df_atualizado)
+                
+                st.success(f"Gasto em {loja} registrado!")
+                st.rerun() # Recarrega a página para atualizar a tabela
+            else:
+                st.warning("Preencha o nome e o valor corretamente.")
+
+# --- 3. EXIBIÇÃO DOS DADOS ---
 st.subheader("Histórico de Gastos")
-conn = sqlite3.connect('meus_gastos.db')
-df = pd.read_sql_query("SELECT data, estabelecimento, valor FROM compras ORDER BY id DESC", conn)
-conn.close()
 
-if not df.empty:
-    st.dataframe(df, use_container_width=True)
-    st.metric("Total Gasto", f"R$ {df['valor'].sum():.2f}")
+if not df_existente.empty:
+    # Exibe a tabela formatada
+    st.dataframe(df_existente, use_container_width=True)
+    
+    # Exibe o total acumulado
+    total = df_existente["valor"].sum()
+    st.metric("Total Acumulado", f"R$ {total:.2f}")
 else:
+    st.info("Aguardando o primeiro registro na planilha...")
     st.info("Nenhum gasto registrado ainda.")
